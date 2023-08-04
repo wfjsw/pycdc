@@ -1178,8 +1178,13 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
                     break;
                 }
 
-                stack = stack_hist.top();
-                stack_hist.pop();
+                if (!stack_hist.empty()) {
+                    stack = stack_hist.top();
+                    stack_hist.pop();
+                } else {
+                    break;
+                }
+
 
                 PycRef<ASTBlock> prev = curblock;
                 PycRef<ASTBlock> nil;
@@ -2363,6 +2368,66 @@ PycRef<ASTNode> BuildFromCode(PycRef<PycCode> code, PycModule* mod)
         case Pyc::PUSH_NULL:
             stack.push(nullptr);
             break;
+        case Pyc::LOAD_ASSERTION_ERROR: {
+            PycString *assertionErrorString = new PycString();
+            assertionErrorString->setValue("AssertionError");
+            PycRef<PycString> assertionErrorStringRef(assertionErrorString);
+            stack.push(new ASTName(assertionErrorStringRef));
+            break;
+        }
+        case Pyc::WITH_EXCEPT_START: {
+            /* At the top of the stack are 7 values:
+               - (TOP, SECOND, THIRD) = exc_info()
+               - (FOURTH, FIFTH, SIXTH) = previous exception for EXCEPT_HANDLER
+               - SEVENTH: the context.__exit__ bound method
+               We call SEVENTH(TOP, SECOND, THIRD).
+               Then we push again the TOP exception and the __exit__
+               return value.
+            */
+            PycRef<ASTNode> exc = stack.top();
+            stack.pop();
+            PycRef<ASTNode> exc_val = stack.top();
+            stack.pop();
+            PycRef<ASTNode> exc_tb = stack.top();
+            stack.pop();
+            PycRef<ASTNode> prev_exc = stack.top();
+            stack.pop();
+            PycRef<ASTNode> prev_exc_val = stack.top();
+            stack.pop();
+            PycRef<ASTNode> prev_exc_tb = stack.top();
+            stack.pop();
+            PycRef<ASTNode> exit = stack.top();
+            stack.pop();
+            ASTCall::pparam_t pparamList;
+            pparamList.push_back(exc);
+            pparamList.push_back(exc_val);
+            pparamList.push_back(exc_tb);
+            PycRef<ASTNode> call = new ASTCall(exit, pparamList, ASTCall::kwparam_t());
+            stack.push(exit);
+            stack.push(prev_exc_tb);
+            stack.push(prev_exc_val);
+            stack.push(prev_exc);
+            stack.push(exc_tb);
+            stack.push(exc_val);
+            stack.push(exc);
+            curblock->append(call);
+            break;
+        }
+        case Pyc::RERAISE: {
+            PycRef<ASTNode> exc = stack.top();
+            stack.pop();
+            PycRef<ASTNode> exc_val = stack.top();
+            stack.pop();
+            PycRef<ASTNode> exc_tb = stack.top();
+            stack.pop();
+            // ASTRaise
+            ASTRaise::param_t paramList;
+            paramList.push_back(exc);
+            paramList.push_back(exc_val);
+            paramList.push_back(exc_tb);
+            curblock->append(new ASTRaise(paramList));
+            break;
+        }
         default:
             fprintf(stderr, "Unsupported opcode: %s\n", Pyc::OpcodeName(opcode & 0xFF));
             cleanBuild = false;
@@ -2830,7 +2895,12 @@ void print_src(PycRef<ASTNode> node, PycModule* mod, std::ostream& pyc_output)
             PycRef<PycObject> obj = node.cast<ASTObject>()->object();
             if (obj.type() == PycObject::TYPE_CODE) {
                 PycRef<PycCode> code = obj.cast<PycCode>();
-                decompyle(code, mod, pyc_output);
+                try {
+                    decompyle(code, mod, pyc_output);
+                } catch (std::exception& ex) {
+                    fprintf(stderr, "Error decompyling: %s\n", ex.what());
+                    return;
+                }
             } else {
                 print_const(pyc_output, obj, mod);
             }
